@@ -1,17 +1,13 @@
 import os
 import re
 import sys
-import requests
 import subprocess
 from dotenv import load_dotenv
 from colorama import Fore, Style, init
 import pyttsx3 
-
-# --- КОНСТАНТЫ API ---
-# Используется стандартный домен Google API
-GEMINI_API_HOST = "generativelanguage.googleapis.com"
-GEMINI_API_URL = f"https://{GEMINI_API_HOST}/v1beta/models/gemini-2.5-flash:generateContent"
-# ---------------------
+from google import genai
+from google.genai import types
+from google.genai.errors import APIError
 
 # Инициализация colorama
 init(autoreset=True, wrap=True)
@@ -24,10 +20,16 @@ if not API_KEY:
     print(Fore.RED + "Ошибка: Ключ GEMINI_API_KEY не найден в файле .env")
     sys.exit(1)
 
+# Инициализация клиента Google GenAI
+try:
+    client = genai.Client(api_key=API_KEY)
+except Exception as e:
+    print(Fore.RED + f"Ошибка инициализации клиента Gemini: {e}")
+    sys.exit(1)
+
 # Инициализация TTS-движка
 tts_engine = None
 try:
-    # Убедитесь, что eSpeak-ng (или аналог) установлен
     tts_engine = pyttsx3.init()
     tts_engine.setProperty('rate', 170)
     # Поиск русского голоса
@@ -37,7 +39,6 @@ try:
             tts_engine.setProperty('voice', voice.id)
             break
 except Exception:
-    # Игнорировать ошибки, если TTS не может быть инициализирован (например, pyttsx3 не находит движка)
     pass
 
 # --- ФУНКЦИИ ---
@@ -53,7 +54,6 @@ def speak_text(text):
     # Fallback для Termux:API
     if os.path.exists('/data/data/com.termux/files/usr/bin/termux-tts-speak'):
         print(Fore.MAGENTA + "[ГОВОРЕНИЕ через Termux:API...]")
-        # Используем Termux-API TTS (требуется установка Termux:API и Termux:TTS)
         try:
             subprocess.run(["termux-tts-speak", text], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
@@ -65,70 +65,45 @@ def speak_text(text):
 
 def send_gemini_request(prompt, chat_history):
     """
-    Отправляет прямой запрос к Gemini API.
+    Отправляет запрос к Gemini API с использованием genai.Client.
     """
     
-    new_history = chat_history + [{"role": "user", "parts": [{"text": prompt}]}]
-    
-    headers = {
-        "Content-Type": "application/json",
-        "x-api-key": API_KEY 
-    }
-    
-    data = {
-        "contents": new_history,
-        "config": {"temperature": 0.7}
-    }
-    
+    # Создаем новый чат с историей
+    # Использование genai.Client.chats.create() позволяет управлять контекстом
     try:
-        response = requests.post(
-            GEMINI_API_URL, 
-            headers=headers, 
-            json=data,
-            verify=True, 
-            timeout=30 
+        chat = client.chats.create(
+            model="gemini-2.5-flash",
+            history=chat_history # Передаем предыдущую историю
         )
-        response.raise_for_status()
-
-        json_response = response.json()
         
-        # Парсинг ответа
-        candidate = json_response.get('candidates', [None])[0]
-        if not candidate:
-            error_details = json_response.get('error', {}).get('message', 'AI вернул пустой ответ (без видимой ошибки).')
-            return f"Ошибка API: {error_details}", chat_history
-
-        ai_response = candidate.get('content', {}).get('parts', [{}])[0].get('text', 'Ошибка: AI вернул пустой текст.')
+        # Отправляем новый запрос
+        response = chat.send_message(prompt)
         
-        # Добавляем ответ AI в историю
-        new_history.append(candidate['content'])
+        # Обновляем историю чата
+        new_history = chat.get_history()
         
-        return ai_response, new_history
+        return response.text, new_history
 
-    except requests.exceptions.HTTPError as e:
-        error_status = e.response.status_code
-        error_msg = f"HTTP Ошибка ({error_status}). Проверьте ключ API (401) и убедитесь, что включен VPN/Прокси (403). {e}"
+    except APIError as e:
+        error_msg = f"Ошибка API Gemini (HTTP): Проверьте ключ и VPN/Прокси. Детали: {e}"
         print(Fore.RED + f"\n{error_msg}")
+        # Возвращаем старую историю при ошибке
         return error_msg, chat_history
         
-    except requests.exceptions.RequestException as e:
-        error_msg = f"Сетевая Ошибка: Не удалось подключиться к Google API. Убедитесь, что включен VPN/Прокси. {e}"
-        print(Fore.RED + f"\n{error_msg}")
-        return "Не удалось получить ответ от AI (ошибка сети/блокировка).", chat_history
-        
     except Exception as e:
-        return f"Критическая ошибка: {e}", chat_history
+        error_msg = f"Критическая сетевая ошибка: Проверьте соединение/VPN. Детали: {e}"
+        print(Fore.RED + f"\n{error_msg}")
+        return "Не удалось получить ответ от AI.", chat_history
 
 # --- ОСНОВНАЯ ФУНКЦИЯ ---
 
 def main():
     """Основная функция CLI-помощника."""
+    # История чата хранится в этом списке
     chat_history = [] 
 
     print(Fore.GREEN + Style.BRIGHT + "========================================")
     print(Fore.GREEN + Style.BRIGHT + "  🤖 Gemini CLI-Помощник запущен!   ")
-    print(Fore.GREEN + Style.BRIGHT + f"  (Прямое подключение)   ")
-    print(Fore.RED + Style.BRIGHT + "  ⚠️ ВНИМАНИЕ: Необходим VPN/Прокси! ⚠️   ")
     print(Fore.GREEN + Style.BRIGHT + "========================================")
     
     while True:
